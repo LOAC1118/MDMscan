@@ -15,7 +15,10 @@
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
 
-<!-- Barcode scanning : BarcodeDetector natif (iOS17+) + fallback canvas/input -->
+<!-- jsQR : décodage EAN/QR sur image, fonctionne partout dont iOS Safari -->
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<!-- ZXing-browser : lecture EAN depuis canvas, bien supporté iOS -->
+<script src="https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/umd/index.min.js"></script>
 
 <!-- jsPDF -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
@@ -900,6 +903,86 @@
   @media (min-width: 520px) {
     .page { padding: 20px; max-width: 480px; margin: 0 auto; }
   }
+
+  /* ─── ZONE SCAN iOS ─── */
+  .scan-ui-box {
+    max-width: 420px;
+    margin: 0 auto;
+  }
+
+  .ios-scan-zone {
+    background: var(--vert);
+    border-radius: 20px;
+    aspect-ratio: 4/3;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    position: relative;
+    overflow: hidden;
+    box-shadow: var(--ombre);
+    transition: transform 0.15s;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .ios-scan-zone:active { transform: scale(0.98); }
+
+  .ios-scan-icon {
+    font-size: 64px;
+    margin-bottom: 12px;
+    filter: drop-shadow(0 4px 12px rgba(0,0,0,0.3));
+  }
+
+  .ios-scan-title {
+    font-size: 20px;
+    color: var(--or-clair);
+    font-weight: bold;
+    letter-spacing: 0.5px;
+  }
+
+  .ios-scan-sub {
+    font-size: 13px;
+    color: rgba(255,255,255,0.6);
+    margin-top: 6px;
+    font-style: italic;
+  }
+
+  /* Coins décoratifs */
+  .ios-frame-deco {
+    position: absolute;
+    inset: 20px;
+    pointer-events: none;
+  }
+
+  .ios-frame-deco span {
+    position: absolute;
+    width: 22px; height: 22px;
+    border-color: var(--or);
+    border-style: solid;
+    opacity: 0.5;
+  }
+
+  .ios-frame-deco span:nth-child(1) { top: 0; left: 0; border-width: 3px 0 0 3px; border-radius: 4px 0 0 0; }
+  .ios-frame-deco span:nth-child(2) { top: 0; right: 0; border-width: 3px 3px 0 0; border-radius: 0 4px 0 0; }
+  .ios-frame-deco span:nth-child(3) { bottom: 0; left: 0; border-width: 0 0 3px 3px; border-radius: 0 0 0 4px; }
+  .ios-frame-deco span:nth-child(4) { bottom: 0; right: 0; border-width: 0 3px 3px 0; border-radius: 0 0 4px 0; }
+
+  .scan-idle-box {
+    background: #e8e4dc;
+    border-radius: 20px;
+    aspect-ratio: 4/3;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    box-shadow: inset 0 2px 8px rgba(0,0,0,0.08);
+  }
+
+  .scan-idle-icon  { font-size: 52px; margin-bottom: 10px; opacity: 0.5; }
+  .scan-idle-title { font-size: 17px; color: var(--gris); }
+  .scan-idle-sub   { font-size: 13px; color: var(--gris); opacity: 0.6; margin-top: 4px; font-style: italic; }
+
 </style>
 </head>
 <body>
@@ -959,32 +1042,57 @@
 <!-- ═══════════════ PAGE SCANNER ═══════════════ -->
 <div class="page" id="page-scanner">
 
-  <!-- Vidéo -->
-  <div class="scanner-container" id="scanner-wrap">
-    <video id="video-preview" playsinline muted autoplay></video>
-    <div class="scan-overlay">
-      <div class="scan-frame">
-        <div class="scan-corners">
+  <!-- Zone visuelle scan -->
+  <div class="scan-ui-box" id="scan-ui-box">
+    <!-- MODE VIDÉO (Android / desktop) -->
+    <div id="scan-video-wrap" style="display:none; position:relative; border-radius:14px; overflow:hidden; background:#000; aspect-ratio:4/3;">
+      <video id="video-preview" playsinline muted autoplay style="width:100%;height:100%;object-fit:cover;display:block;"></video>
+      <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none">
+        <div class="scan-frame"><div class="scan-corners"><span></span><span></span><span></span><span></span></div></div>
+      </div>
+      <div style="position:absolute;bottom:12px;left:0;right:0;text-align:center;color:rgba(255,255,255,0.8);font-size:12px;font-style:italic">
+        Pointez vers le code-barres
+      </div>
+      <div class="scan-flash" id="scan-flash"></div>
+    </div>
+
+    <!-- MODE IOS : grande zone cliquable -->
+    <div id="scan-ios-wrap" style="display:none;">
+      <div class="ios-scan-zone" onclick="triggerIOSCamera()">
+        <div class="ios-scan-icon">📷</div>
+        <div class="ios-scan-title">Appuyez pour scanner</div>
+        <div class="ios-scan-sub">Ouvre l'appareil photo iOS</div>
+        <div class="ios-frame-deco">
           <span></span><span></span><span></span><span></span>
         </div>
       </div>
     </div>
-    <div class="scan-status">
-      <span class="scan-badge" id="scan-badge">⏸ Caméra arrêtée</span>
+
+    <!-- Écran accueil (avant choix) -->
+    <div id="scan-idle-wrap">
+      <div class="scan-idle-box">
+        <div class="scan-idle-icon">🔍</div>
+        <div class="scan-idle-title">Scanner un produit</div>
+        <div class="scan-idle-sub">Appuyez sur Démarrer</div>
+      </div>
     </div>
-    <div class="scan-hint" id="scan-hint" style="display:none">Centrez le code-barres dans le cadre</div>
-    <div class="scan-flash" id="scan-flash"></div>
+
+    <!-- Canvas caché pour décodage image -->
+    <canvas id="decode-canvas" style="display:none"></canvas>
+    <!-- Input caméra iOS -->
+    <input type="file" id="ios-camera-input" accept="image/*" capture="environment"
+           style="display:none" onchange="handleIOSPhoto(event)">
   </div>
 
-  <!-- Input file caché pour iOS fallback -->
-  <input type="file" id="ios-camera-input" accept="image/*" capture="environment"
-         style="display:none" onchange="handleIOSCapture(event)">
+  <!-- Badge statut -->
+  <div style="text-align:center; margin:10px 0 6px;">
+    <span class="scan-badge" id="scan-badge">⏸ Prêt</span>
+  </div>
 
   <!-- Contrôles -->
-  <div class="scan-controls">
+  <div class="scan-controls" id="scan-controls">
     <button class="btn-scan start" id="btn-start-scan" onclick="startScan()">▶ Démarrer</button>
-    <button class="btn-scan stop" id="btn-stop-scan" onclick="stopScan()" style="display:none">⏹ Stop</button>
-    <button class="btn-scan ios-photo" id="btn-ios-photo" onclick="startIOSScan()" style="display:none">📷 Photo</button>
+    <button class="btn-scan stop"  id="btn-stop-scan"  onclick="stopScan()" style="display:none">⏹ Stop</button>
     <button class="btn-scan manual" onclick="showManualEntry()">⌨ Manuel</button>
   </div>
 
@@ -1297,159 +1405,209 @@ async function chargerCollection(col) {
 }
 
 // ── SCANNER ──────────────────────────────────────────────────────
-// ── DÉTECTION iOS ────────────────────────────────────────────────
+// ── MOTEUR SCAN ─────────────────────────────────────────────────
+// Détection plateforme
+// Chrome iOS utilise WebKit mais SUPPORTE getUserMedia — ne pas le bloquer
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
-const hasBarcodeDetector = 'BarcodeDetector' in window;
+const isChromeIOS = isIOS && /CriOS/.test(navigator.userAgent);
+const isSafariOnly = isIOS && !isChromeIOS && /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+// Forcer le mode photo uniquement pour Safari natif iOS (pas Chrome iOS)
+const forcePhotoMode = isSafariOnly;
 
-// Au chargement : adapter les boutons selon la plateforme
-window.addEventListener('DOMContentLoaded', () => {
-  if (isIOS && !hasBarcodeDetector) {
-    // iOS < 17 sans BarcodeDetector natif → mode photo uniquement
-    document.getElementById('btn-start-scan').style.display = 'none';
-    document.getElementById('btn-ios-photo').style.display  = 'flex';
-    document.getElementById('scan-badge').textContent = '📷 Mode photo iOS';
+let videoStream   = null;
+let videoLoop     = null;
+let zxingReader   = null;
+
+// Initialisation
+window.addEventListener('load', () => {
+  if (forcePhotoMode) {
+    // Safari iOS pur → mode photo uniquement
+    document.getElementById('scan-idle-wrap').style.display = 'none';
+    document.getElementById('scan-ios-wrap').style.display  = 'block';
+    document.getElementById('btn-start-scan').textContent = '📷 Ouvrir caméra';
+    document.getElementById('scan-badge').textContent = '📷 Mode photo';
   }
+  // Chrome iOS et Android → mode vidéo normal disponible
 });
 
-// ── MODE VIDÉO (Android + iOS 17+ avec BarcodeDetector) ──────────
-let videoStream = null;
-let barcodeLoop = null;
-let barcodeDetector = null;
-
+// Bouton Démarrer
 async function startScan() {
+  if (forcePhotoMode) {
+    triggerIOSCamera();
+    return;
+  }
+
+  // Chrome iOS / Android / Desktop : vidéo en continu
   stopScan();
+  document.getElementById('scan-badge').textContent = '⏳ Accès caméra…';
+
   try {
-    // Demande accès caméra avec contraintes iOS-friendly
+    // Contraintes adaptées iOS Chrome : éviter les résolutions trop élevées
     const constraints = {
       video: {
         facingMode: { ideal: 'environment' },
-        width:  { ideal: 1280 },
-        height: { ideal: 720 }
+        width:  { ideal: isIOS ? 1280 : 1920 },
+        height: { ideal: isIOS ? 720  : 1080 }
       }
     };
 
     videoStream = await navigator.mediaDevices.getUserMedia(constraints);
     const video = document.getElementById('video-preview');
     video.srcObject = videoStream;
-    await video.play();
 
-    scannerRunning = true;
-    document.getElementById('btn-start-scan').style.display = 'none';
-    document.getElementById('btn-stop-scan').style.display  = 'flex';
+    // iOS Chrome nécessite un geste utilisateur + play() explicite
+    video.setAttribute('playsinline', '');
+    video.setAttribute('muted', '');
+    await video.play().catch(e => console.warn('play():', e));
+
+    document.getElementById('scan-idle-wrap').style.display  = 'none';
+    document.getElementById('scan-ios-wrap').style.display   = 'none';
+    document.getElementById('scan-video-wrap').style.display = 'block';
+    document.getElementById('btn-start-scan').style.display  = 'none';
+    document.getElementById('btn-stop-scan').style.display   = 'flex';
     document.getElementById('scan-badge').textContent = '🔴 Scan actif';
-    document.getElementById('scan-hint').style.display = 'block';
 
-    // Démarrer la détection
-    if (hasBarcodeDetector) {
-      barcodeDetector = new BarcodeDetector({
-        formats: ['ean_13','ean_8','code_128','code_39','upc_a','upc_e','qr_code']
-      });
-      startBarcodeDetectorLoop(video);
-    } else {
-      // Fallback : basculer en mode photo sur iOS sans BarcodeDetector
-      stopScan();
-      startIOSScan();
-    }
+    // Attendre que la vidéo soit prête avant de lancer la boucle
+    video.addEventListener('loadedmetadata', () => startVideoLoop(video), { once: true });
+    // Fallback si loadedmetadata déjà passé
+    if (video.readyState >= 1) startVideoLoop(video);
 
   } catch(e) {
-    // Sur iOS, getUserMedia peut échouer → basculer en mode photo
-    console.warn('getUserMedia échoué:', e.message);
-    stopScan();
-    if (isIOS) {
-      document.getElementById('btn-start-scan').style.display = 'none';
-      document.getElementById('btn-ios-photo').style.display  = 'flex';
-      document.getElementById('scan-badge').textContent = '📷 Mode photo iOS';
-      showToast('📷 Utilise le bouton Photo pour scanner');
-    } else {
-      showToast('⚠️ Caméra inaccessible : ' + e.message);
-    }
+    console.warn('getUserMedia échoué:', e.name, e.message);
+    // Basculer en mode photo si la caméra vidéo est refusée
+    showToast('📷 Mode photo activé — autorise la caméra si demandé');
+    document.getElementById('scan-idle-wrap').style.display = 'none';
+    document.getElementById('scan-ios-wrap').style.display  = 'block';
+    document.getElementById('btn-start-scan').textContent = '📷 Ouvrir caméra';
+    document.getElementById('btn-start-scan').onclick = triggerIOSCamera;
+    document.getElementById('scan-badge').textContent = '📷 Mode photo';
   }
 }
 
-function startBarcodeDetectorLoop(video) {
-  const canvas = document.createElement('canvas');
-  const ctx = canvas.getContext('2d');
+// Boucle de décodage vidéo (Android)
+function startVideoLoop(video) {
+  const canvas = document.getElementById('decode-canvas');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
 
-  async function detect() {
-    if (!scannerRunning || !barcodeDetector) return;
-    try {
-      if (video.readyState === video.HAVE_ENOUGH_DATA) {
-        canvas.width  = video.videoWidth;
-        canvas.height = video.videoHeight;
-        ctx.drawImage(video, 0, 0);
-        const barcodes = await barcodeDetector.detect(canvas);
-        if (barcodes.length > 0) {
-          onBarcodeScan(barcodes[0].rawValue);
+  async function loop() {
+    if (!videoStream) return;
+    if (video.readyState >= 2) {
+      canvas.width  = video.videoWidth  || 640;
+      canvas.height = video.videoHeight || 480;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      // Essai 1 : jsQR (QR codes)
+      try {
+        const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const qr = jsQR(imgData.data, imgData.width, imgData.height, { inversionAttempts: 'dontInvert' });
+        if (qr && qr.data) { onBarcodeScan(qr.data); return; }
+      } catch(e) {}
+
+      // Essai 2 : ZXing browser pour EAN/Code128
+      try {
+        if (window.ZXingBrowser) {
+          const hints = new Map();
+          const reader = new ZXingBrowser.BrowserMultiFormatReader();
+          const result = await reader.decodeFromCanvas(canvas);
+          if (result) { onBarcodeScan(result.getText()); return; }
         }
-      }
-    } catch(e) {}
-    barcodeLoop = setTimeout(detect, 300);
+      } catch(e) {}
+    }
+    videoLoop = setTimeout(loop, 300);
   }
-  detect();
+  loop();
 }
 
 function stopScan() {
-  // Arrêter la boucle
-  if (barcodeLoop) { clearTimeout(barcodeLoop); barcodeLoop = null; }
-  barcodeDetector = null;
-
-  // Arrêter le flux vidéo
-  if (videoStream) {
-    videoStream.getTracks().forEach(t => t.stop());
-    videoStream = null;
-  }
+  if (videoLoop)   { clearTimeout(videoLoop);  videoLoop = null; }
+  if (videoStream) { videoStream.getTracks().forEach(t => t.stop()); videoStream = null; }
   const video = document.getElementById('video-preview');
-  video.srcObject = null;
+  if (video) video.srcObject = null;
 
-  scannerRunning = false;
-  document.getElementById('btn-start-scan').style.display = isIOS && !hasBarcodeDetector ? 'none' : 'flex';
-  document.getElementById('btn-ios-photo').style.display  = isIOS && !hasBarcodeDetector ? 'flex' : 'none';
-  document.getElementById('btn-stop-scan').style.display  = 'none';
-  document.getElementById('scan-badge').textContent = isIOS && !hasBarcodeDetector
-    ? '📷 Mode photo iOS' : '⏸ Caméra arrêtée';
-  document.getElementById('scan-hint').style.display = 'none';
+  document.getElementById('scan-video-wrap').style.display = 'none';
+  document.getElementById('scan-idle-wrap').style.display  = forcePhotoMode ? 'none' : 'block';
+  document.getElementById('scan-ios-wrap').style.display   = forcePhotoMode ? 'block' : 'none';
+  document.getElementById('btn-start-scan').style.display  = 'flex';
+  document.getElementById('btn-start-scan').textContent    = forcePhotoMode ? '📷 Ouvrir caméra' : '▶ Démarrer';
+  document.getElementById('btn-start-scan').onclick        = forcePhotoMode ? triggerIOSCamera : startScan;
+  document.getElementById('btn-stop-scan').style.display   = 'none';
+  document.getElementById('scan-badge').textContent = forcePhotoMode ? '📷 Mode photo' : '⏸ Prêt';
 }
 
-// ── MODE PHOTO iOS (fallback universel) ──────────────────────────
-function startIOSScan() {
-  document.getElementById('ios-camera-input').click();
+// ── MODE PHOTO iOS ────────────────────────────────────────────────
+function triggerIOSCamera() {
+  const input = document.getElementById('ios-camera-input');
+  input.value = ''; // reset pour permettre re-scan
+  input.click();
 }
 
-async function handleIOSCapture(event) {
+async function handleIOSPhoto(event) {
   const file = event.target.files[0];
   if (!file) return;
-
-  // Réinitialiser l'input pour permettre re-scan du même code
   event.target.value = '';
 
-  document.getElementById('scan-badge').textContent = '⏳ Analyse...';
+  document.getElementById('scan-badge').textContent = '⏳ Analyse en cours…';
 
   try {
-    // Utiliser BarcodeDetector sur l'image si dispo
-    if (hasBarcodeDetector) {
-      const img = await createImageBitmap(file);
-      const detector = new BarcodeDetector({
-        formats: ['ean_13','ean_8','code_128','code_39','upc_a','upc_e','qr_code']
-      });
-      const barcodes = await detector.detect(img);
-      if (barcodes.length > 0) {
-        onBarcodeScan(barcodes[0].rawValue);
-        document.getElementById('scan-badge').textContent = '✅ Code détecté';
-        return;
-      }
+    // Lire le fichier comme image via canvas
+    const bitmap = await createImageBitmap(file);
+    const canvas = document.getElementById('decode-canvas');
+    // Réduire la taille pour accélérer le décodage (max 1200px)
+    const scale = Math.min(1, 1200 / Math.max(bitmap.width, bitmap.height));
+    canvas.width  = Math.round(bitmap.width  * scale);
+    canvas.height = Math.round(bitmap.height * scale);
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+
+    let decoded = null;
+
+    // Tentative 1 : jsQR
+    try {
+      const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const qr = jsQR(imgData.data, imgData.width, imgData.height, { inversionAttempts: 'dontInvert' });
+      if (qr && qr.data) decoded = qr.data;
+    } catch(e) {}
+
+    // Tentative 2 : ZXing/browser sur le canvas
+    if (!decoded) {
+      try {
+        if (window.ZXingBrowser) {
+          const reader = new ZXingBrowser.BrowserMultiFormatReader();
+          const result = await reader.decodeFromCanvas(canvas);
+          if (result) decoded = result.getText();
+        }
+      } catch(e) {}
     }
 
-    // Fallback : afficher un message et demander saisie manuelle
-    showToast('❌ Code non lu — essaie de te rapprocher ou saisis manuellement');
-    showManualEntry();
+    // Tentative 3 : rogner le centre (souvent le code est centré)
+    if (!decoded) {
+      try {
+        const cx = Math.round(canvas.width * 0.15);
+        const cy = Math.round(canvas.height * 0.25);
+        const cw = Math.round(canvas.width * 0.70);
+        const ch = Math.round(canvas.height * 0.50);
+        const crop = ctx.getImageData(cx, cy, cw, ch);
+        const qr2 = jsQR(crop.data, cw, ch, { inversionAttempts: 'attemptBoth' });
+        if (qr2 && qr2.data) decoded = qr2.data;
+      } catch(e) {}
+    }
+
+    if (decoded) {
+      onBarcodeScan(decoded);
+      document.getElementById('scan-badge').textContent = '✅ Code détecté !';
+    } else {
+      document.getElementById('scan-badge').textContent = '❌ Non détecté';
+      showToast('❌ Code non lu — rapproche-toi et centrez le code-barres');
+      // Réouvrir automatiquement après 1.5s
+      setTimeout(() => {
+        document.getElementById('scan-badge').textContent = '📷 Mode photo iOS';
+      }, 2000);
+    }
 
   } catch(e) {
-    console.error('handleIOSCapture:', e);
-    showToast('⚠️ Erreur lecture image');
-  } finally {
-    setTimeout(() => {
-      document.getElementById('scan-badge').textContent = '📷 Mode photo iOS';
-    }, 2000);
+    console.error('handleIOSPhoto:', e);
+    document.getElementById('scan-badge').textContent = '⚠️ Erreur';
+    showToast('⚠️ Erreur lecture image : ' + e.message);
   }
 }
 
@@ -1458,78 +1616,17 @@ let lastScanTime = 0;
 
 function onBarcodeScan(ean) {
   const now = Date.now();
-  if (ean === lastScanned && now - lastScanTime < 3000) return; // anti-doublon
-  lastScanned = ean;
+  if (ean === lastScanned && now - lastScanTime < 3000) return;
+  lastScanned  = ean;
   lastScanTime = now;
   sessionScans++;
   document.getElementById('stat-scans').textContent = sessionScans;
 
-  // Flash visuel
   const flash = document.getElementById('scan-flash');
-  flash.classList.add('active');
-  setTimeout(() => flash.classList.remove('active'), 180);
-
-  // Vibration
-  if (navigator.vibrate) navigator.vibrate(60);
+  if (flash) { flash.classList.add('active'); setTimeout(() => flash.classList.remove('active'), 180); }
+  if (navigator.vibrate) navigator.vibrate(80);
 
   rechercherProduit(ean);
-}
-
-function rechercherProduit(ean) {
-  dismissResult();
-  const clean = ean.trim();
-  const p = catalogueProduits.find(p =>
-    p.ean === clean ||
-    p.ean === clean.replace(/^0+/, '') ||
-    clean.endsWith(p.ean)
-  );
-
-  if (p) {
-    currentProduit = p;
-    currentQty = 1;
-    document.getElementById('r-nom').textContent = p.nom;
-    document.getElementById('r-details').textContent =
-      (p.ref ? 'Réf: ' + p.ref + ' · ' : '') + 'EAN: ' + clean;
-    document.getElementById('r-prix').textContent = p.prix_ht > 0
-      ? p.prix_ht.toFixed(2) + ' € HT / ' + p.unite
-      : 'Prix non renseigné';
-    document.getElementById('qty-val').textContent = currentQty;
-    document.getElementById('qty-unit').textContent = p.unite || 'colis';
-    document.getElementById('scan-result').classList.add('visible');
-    document.getElementById('scan-notfound').classList.remove('visible');
-  } else {
-    currentProduit = null;
-    document.getElementById('notfound-ean').textContent = 'EAN : ' + clean;
-    document.getElementById('scan-notfound').classList.add('visible');
-    document.getElementById('scan-result').classList.remove('visible');
-    setTimeout(() => document.getElementById('scan-notfound').classList.remove('visible'), 4000);
-  }
-}
-
-function changeQty(delta) {
-  currentQty = Math.max(1, currentQty + delta);
-  document.getElementById('qty-val').textContent = currentQty;
-}
-
-function ajouterAuPanier() {
-  if (!currentProduit) return;
-  const existing = panier.find(i => i.produit.ean === currentProduit.ean);
-  if (existing) {
-    existing.qte += currentQty;
-  } else {
-    panier.push({ produit: currentProduit, qte: currentQty });
-  }
-  dismissResult();
-  updateBadge();
-  renderPanier();
-  updateStats();
-  showToast('✅ ' + currentProduit.nom.substring(0, 30) + ' ajouté');
-}
-
-function dismissResult() {
-  document.getElementById('scan-result').classList.remove('visible');
-  document.getElementById('scan-notfound').classList.remove('visible');
-  currentProduit = null;
 }
 
 // ── SAISIE MANUELLE ──────────────────────────────────────────────
