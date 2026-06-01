@@ -15,8 +15,7 @@
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
 
-<!-- ZXing barcode library -->
-<script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
+<!-- Barcode scanning : BarcodeDetector natif (iOS17+) + fallback canvas/input -->
 
 <!-- jsPDF -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
@@ -342,6 +341,7 @@
   .btn-scan.start { background: var(--vert); color: var(--or-clair); }
   .btn-scan.stop { background: #555; color: white; }
   .btn-scan.manual { background: var(--or); color: var(--vert); font-weight: bold; }
+  .btn-scan.ios-photo { background: #1a6fb5; color: white; font-weight: bold; }
 
   /* Résultat scan */
   .scan-result {
@@ -976,10 +976,15 @@
     <div class="scan-flash" id="scan-flash"></div>
   </div>
 
+  <!-- Input file caché pour iOS fallback -->
+  <input type="file" id="ios-camera-input" accept="image/*" capture="environment"
+         style="display:none" onchange="handleIOSCapture(event)">
+
   <!-- Contrôles -->
   <div class="scan-controls">
     <button class="btn-scan start" id="btn-start-scan" onclick="startScan()">▶ Démarrer</button>
     <button class="btn-scan stop" id="btn-stop-scan" onclick="stopScan()" style="display:none">⏹ Stop</button>
+    <button class="btn-scan ios-photo" id="btn-ios-photo" onclick="startIOSScan()" style="display:none">📷 Photo</button>
     <button class="btn-scan manual" onclick="showManualEntry()">⌨ Manuel</button>
   </div>
 
@@ -1292,43 +1297,160 @@ async function chargerCollection(col) {
 }
 
 // ── SCANNER ──────────────────────────────────────────────────────
+// ── DÉTECTION iOS ────────────────────────────────────────────────
+const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+const hasBarcodeDetector = 'BarcodeDetector' in window;
+
+// Au chargement : adapter les boutons selon la plateforme
+window.addEventListener('DOMContentLoaded', () => {
+  if (isIOS && !hasBarcodeDetector) {
+    // iOS < 17 sans BarcodeDetector natif → mode photo uniquement
+    document.getElementById('btn-start-scan').style.display = 'none';
+    document.getElementById('btn-ios-photo').style.display  = 'flex';
+    document.getElementById('scan-badge').textContent = '📷 Mode photo iOS';
+  }
+});
+
+// ── MODE VIDÉO (Android + iOS 17+ avec BarcodeDetector) ──────────
+let videoStream = null;
+let barcodeLoop = null;
+let barcodeDetector = null;
+
 async function startScan() {
   stopScan();
   try {
-    if (!window.ZXing) { showToast('⚠️ Bibliothèque scanner non chargée'); return; }
-    codeReader = new ZXing.BrowserMultiFormatReader();
-    const devices = await ZXing.BrowserMultiFormatReader.listVideoInputDevices();
-    // Préférer caméra arrière
-    let deviceId = undefined;
-    const back = devices.find(d => /back|rear|environment/i.test(d.label));
-    if (back) deviceId = back.deviceId;
-    else if (devices.length > 1) deviceId = devices[1].deviceId;
-
-    await codeReader.decodeFromVideoDevice(deviceId, 'video-preview', (result, err) => {
-      if (result) {
-        onBarcodeScan(result.getText());
+    // Demande accès caméra avec contraintes iOS-friendly
+    const constraints = {
+      video: {
+        facingMode: { ideal: 'environment' },
+        width:  { ideal: 1280 },
+        height: { ideal: 720 }
       }
-    });
+    };
+
+    videoStream = await navigator.mediaDevices.getUserMedia(constraints);
+    const video = document.getElementById('video-preview');
+    video.srcObject = videoStream;
+    await video.play();
+
     scannerRunning = true;
     document.getElementById('btn-start-scan').style.display = 'none';
     document.getElementById('btn-stop-scan').style.display  = 'flex';
     document.getElementById('scan-badge').textContent = '🔴 Scan actif';
     document.getElementById('scan-hint').style.display = 'block';
+
+    // Démarrer la détection
+    if (hasBarcodeDetector) {
+      barcodeDetector = new BarcodeDetector({
+        formats: ['ean_13','ean_8','code_128','code_39','upc_a','upc_e','qr_code']
+      });
+      startBarcodeDetectorLoop(video);
+    } else {
+      // Fallback : basculer en mode photo sur iOS sans BarcodeDetector
+      stopScan();
+      startIOSScan();
+    }
+
   } catch(e) {
-    showToast('⚠️ Caméra inaccessible : ' + e.message);
+    // Sur iOS, getUserMedia peut échouer → basculer en mode photo
+    console.warn('getUserMedia échoué:', e.message);
+    stopScan();
+    if (isIOS) {
+      document.getElementById('btn-start-scan').style.display = 'none';
+      document.getElementById('btn-ios-photo').style.display  = 'flex';
+      document.getElementById('scan-badge').textContent = '📷 Mode photo iOS';
+      showToast('📷 Utilise le bouton Photo pour scanner');
+    } else {
+      showToast('⚠️ Caméra inaccessible : ' + e.message);
+    }
   }
 }
 
-function stopScan() {
-  if (codeReader) {
-    try { codeReader.reset(); } catch(e) {}
-    codeReader = null;
+function startBarcodeDetectorLoop(video) {
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+
+  async function detect() {
+    if (!scannerRunning || !barcodeDetector) return;
+    try {
+      if (video.readyState === video.HAVE_ENOUGH_DATA) {
+        canvas.width  = video.videoWidth;
+        canvas.height = video.videoHeight;
+        ctx.drawImage(video, 0, 0);
+        const barcodes = await barcodeDetector.detect(canvas);
+        if (barcodes.length > 0) {
+          onBarcodeScan(barcodes[0].rawValue);
+        }
+      }
+    } catch(e) {}
+    barcodeLoop = setTimeout(detect, 300);
   }
+  detect();
+}
+
+function stopScan() {
+  // Arrêter la boucle
+  if (barcodeLoop) { clearTimeout(barcodeLoop); barcodeLoop = null; }
+  barcodeDetector = null;
+
+  // Arrêter le flux vidéo
+  if (videoStream) {
+    videoStream.getTracks().forEach(t => t.stop());
+    videoStream = null;
+  }
+  const video = document.getElementById('video-preview');
+  video.srcObject = null;
+
   scannerRunning = false;
-  document.getElementById('btn-start-scan').style.display = 'flex';
+  document.getElementById('btn-start-scan').style.display = isIOS && !hasBarcodeDetector ? 'none' : 'flex';
+  document.getElementById('btn-ios-photo').style.display  = isIOS && !hasBarcodeDetector ? 'flex' : 'none';
   document.getElementById('btn-stop-scan').style.display  = 'none';
-  document.getElementById('scan-badge').textContent = '⏸ Caméra arrêtée';
+  document.getElementById('scan-badge').textContent = isIOS && !hasBarcodeDetector
+    ? '📷 Mode photo iOS' : '⏸ Caméra arrêtée';
   document.getElementById('scan-hint').style.display = 'none';
+}
+
+// ── MODE PHOTO iOS (fallback universel) ──────────────────────────
+function startIOSScan() {
+  document.getElementById('ios-camera-input').click();
+}
+
+async function handleIOSCapture(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+
+  // Réinitialiser l'input pour permettre re-scan du même code
+  event.target.value = '';
+
+  document.getElementById('scan-badge').textContent = '⏳ Analyse...';
+
+  try {
+    // Utiliser BarcodeDetector sur l'image si dispo
+    if (hasBarcodeDetector) {
+      const img = await createImageBitmap(file);
+      const detector = new BarcodeDetector({
+        formats: ['ean_13','ean_8','code_128','code_39','upc_a','upc_e','qr_code']
+      });
+      const barcodes = await detector.detect(img);
+      if (barcodes.length > 0) {
+        onBarcodeScan(barcodes[0].rawValue);
+        document.getElementById('scan-badge').textContent = '✅ Code détecté';
+        return;
+      }
+    }
+
+    // Fallback : afficher un message et demander saisie manuelle
+    showToast('❌ Code non lu — essaie de te rapprocher ou saisis manuellement');
+    showManualEntry();
+
+  } catch(e) {
+    console.error('handleIOSCapture:', e);
+    showToast('⚠️ Erreur lecture image');
+  } finally {
+    setTimeout(() => {
+      document.getElementById('scan-badge').textContent = '📷 Mode photo iOS';
+    }, 2000);
+  }
 }
 
 let lastScanned = '';
